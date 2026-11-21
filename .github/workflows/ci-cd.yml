@@ -1,0 +1,179 @@
+# CI/CD SukaKetemu (ENV-01)
+# - Setiap PR & push: typecheck/lint/test/build hanya untuk folder yang berubah.
+# - Push ke dev  : deploy PREVIEW ke Vercel (untuk uji integrasi tim).
+# - Push ke main : deploy PRODUCTION ke Vercel.
+# Deploy hanya jalan jika CI folder tersebut lolos.
+# Frontend dan backend adalah dua project Vercel terpisah (decoupled).
+# Rahasia Vercel TIDAK pernah dipakai di event pull_request, hanya di push ke branch terlindungi.
+
+name: CI/CD
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Hak akses token minimum. Job yang butuh lebih harus menambah sendiri.
+permissions:
+  contents: read
+
+# Push baru di branch yang sama membatalkan run lama, kecuali di main (agar deploy tidak terputus).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  NODE_VERSION: "22"
+  VERCEL_CLI_VERSION: "66.6.0"
+
+jobs:
+  changes:
+    name: Deteksi perubahan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      backend: ${{ steps.filter.outputs.backend }}
+      ai-service: ${{ steps.filter.outputs.ai-service }}
+      frontend-exists: ${{ steps.exists.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci-cd.yml'
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci-cd.yml'
+            ai-service:
+              - 'ai-service/**'
+      # hashFiles() tidak boleh dipakai di `if` level job, jadi keberadaan folder dicek di sini.
+      - id: exists
+        run: |
+          if [ -f frontend/package.json ]; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  backend-ci:
+    name: Backend - audit, typecheck, test, build
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  frontend-ci:
+    name: Frontend - audit, lint, build
+    needs: changes
+    # Lewati dengan aman bila folder frontend belum ada di branch ini.
+    if: needs.changes.outputs.frontend == 'true' && needs.changes.outputs.frontend-exists == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run lint
+      - run: npm run build
+
+  # Deploy dari push ke main (production) atau dev (preview).
+  # Rahasia disimpan di GitHub Environment "production" / "preview",
+  # sehingga environment production bisa diberi aturan persetujuan (required reviewers).
+  # Saklar: deploy hanya jalan jika repository variable VERCEL_DEPLOY_ENABLED = "true".
+  # Selama akun Vercel belum siap, biarkan variabel ini tidak ada; job deploy dilewati (bukan gagal).
+  deploy-backend:
+    name: Deploy backend ke Vercel
+    needs: backend-ci
+    if: vars.VERCEL_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_BACKEND }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
+      PROD_FLAG: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm i -g vercel@"$VERCEL_CLI_VERSION"
+      - run: vercel pull --yes --environment="$VERCEL_ENV" --token="$VERCEL_TOKEN"
+      - run: vercel build $PROD_FLAG --token="$VERCEL_TOKEN"
+      - name: Deploy
+        run: |
+          url=$(vercel deploy --prebuilt $PROD_FLAG --token="$VERCEL_TOKEN")
+          echo "### Backend ($VERCEL_ENV): $url" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-frontend:
+    name: Deploy frontend ke Vercel
+    needs: frontend-ci
+    if: vars.VERCEL_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_FRONTEND }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
+      PROD_FLAG: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm i -g vercel@"$VERCEL_CLI_VERSION"
+      - run: vercel pull --yes --environment="$VERCEL_ENV" --token="$VERCEL_TOKEN"
+      - run: vercel build $PROD_FLAG --token="$VERCEL_TOKEN"
+      - name: Deploy
+        run: |
+          url=$(vercel deploy --prebuilt $PROD_FLAG --token="$VERCEL_TOKEN")
+          echo "### Frontend ($VERCEL_ENV): $url" >> "$GITHUB_STEP_SUMMARY"
