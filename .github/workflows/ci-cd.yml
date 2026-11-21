@@ -114,10 +114,12 @@ jobs:
   # Deploy dari push ke main (production) atau dev (preview).
   # Rahasia disimpan di GitHub Environment "production" / "preview",
   # sehingga environment production bisa diberi aturan persetujuan (required reviewers).
+  # Saklar: deploy hanya jalan jika repository variable VERCEL_DEPLOY_ENABLED = "true".
+  # Selama akun Vercel belum siap, biarkan variabel ini tidak ada; job deploy dilewati (bukan gagal).
   deploy-backend:
     name: Deploy backend ke Vercel
     needs: backend-ci
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    if: vars.VERCEL_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
@@ -148,7 +150,7 @@ jobs:
   deploy-frontend:
     name: Deploy frontend ke Vercel
     needs: frontend-ci
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    if: vars.VERCEL_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
     runs-on: ubuntu-latest
     environment:
       name: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}

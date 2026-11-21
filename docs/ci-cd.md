@@ -25,6 +25,8 @@ Pengamanan yang sudah dipasang:
 - Secret Vercel hanya dipakai di job deploy pada event `push` ke `dev`/`main`. PR dari fork tidak pernah bisa membaca secret.
 - Auto-deploy bawaan Vercel dimatikan (`"git": { "deploymentEnabled": false }` di `vercel.json`) supaya deploy hanya lewat pipeline yang sudah lolos CI.
 
+**Saklar deploy:** job deploy hanya berjalan jika *repository variable* `VERCEL_DEPLOY_ENABLED` bernilai `true`. Selama akun Vercel belum disiapkan, variabel ini tidak perlu dibuat: CI tetap berjalan dan job deploy dilewati, tidak gagal. Setelah langkah 3.1–3.2 selesai, nyalakan lewat **Settings → Secrets and variables → Actions → Variables → New repository variable** dengan nama `VERCEL_DEPLOY_ENABLED` dan nilai `true`.
+
 ## 2. Strategi branch
 
 ```
